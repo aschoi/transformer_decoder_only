@@ -1,0 +1,5 @@
+datasets==5.0.0
+evaluate==0.4.6
+tokenizers==0.22.2
+tqdm==4.69.1
+torch==2.13.0

@@ -1,0 +1,8 @@
+datasets==5.0.0
+evaluate==0.4.6
+tokenizers==0.22.2
+tqdm==4.69.1
+
+boto3==1.40
+
+# Runpod does not require torch. Presents conflicts to add it as a req.
