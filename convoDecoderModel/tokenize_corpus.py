@@ -67,28 +67,13 @@ def main() -> None:
         # workers=8,
         tasks=NUM_TASKS,        
         workers=NUM_WORKERS,
-        logging_dir=LOG_DIR
+        logging_dir=str(LOG_DIR)
     )
 
 
     executor.run()
 
 
-    # x, y = test_dataset[0]
-    # print(x.shape)
-    # print(y.shape)
-    # assert x.shape == (2048,)
-    # assert y.shape == (2048,)
-    # assert torch.equal(x[1:], y[:-1])
-
-    # tokenizer = Tokenizer.from_file(tokenizer_path)
-
-    # print(
-    #     tokenizer.decode(
-    #         x[:100].tolist(),
-    #         skip_special_tokens=False,
-    #     )
-    # )
 
 if __name__ == "__main__":
     main()
