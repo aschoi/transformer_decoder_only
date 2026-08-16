@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent
 TOKENIZER_PATH = ROOT / "tokenizer" / "tokenizer_llama_style.json"
 OUTPUT_DIR = ROOT/ "data" / "tokenized" / "fineweb_edu_10bt"
 WORKING_DIR = ROOT / "data" / "tokenized" / "temp"
-LOG_DIR = ROOT / "logs" / "tokenize_smoke"      # "logs/tokenized_llamaStyle_finewebEdu_10bt"
+LOG_DIR = ROOT / "logs" / "tokenized_llamaStyle_finewebEdu_10bt"     
 
 
 DATASET_PATH = "hf://datasets/HuggingFaceFW/fineweb-edu/sample/10BT"
@@ -20,9 +20,10 @@ DATASET_PATH = "hf://datasets/HuggingFaceFW/fineweb-edu/sample/10BT"
 EOS_TOKEN = "<|endoftext|>"
 
 BATCH_SIZE = 1_000
-NUM_DOCUMENTS = 10_000  # for test runs first
-NUM_TASKS = 1           # for test runs first
-NUM_WORKERS = 1         # for test runs first
+NUM_DOCUMENTS = 10_000  
+MAX_TOKENS_PER_FILE = 250_000_000
+NUM_TASKS = 14         
+NUM_WORKERS = 8         
 
 
 def main() -> None:
@@ -48,31 +49,29 @@ def main() -> None:
     executor = LocalPipelineExecutor(
         pipeline=[
             # ParquetReader(dataset_path, glob_pattern="*.parquet"),
-            ParquetReader(DATASET_PATH, glob_pattern="*.parquet", limit=NUM_DOCUMENTS), 
+            ParquetReader(DATASET_PATH, glob_pattern="*.parquet"), 
             DocumentTokenizer(
                 output_folder=str(OUTPUT_DIR),
-                # local_working_dir=WORKING_DIR,
                 tokenizer_name_or_path=str(TOKENIZER_PATH),
+                save_filename="fineweb_edu",
                 eos_token=EOS_TOKEN,
-                save_filename="smoke",
+                local_working_dir=WORKING_DIR,
                 save_index=True,
-                # save_filename="train",
+                save_loss_metadata=False,
                 batch_size=BATCH_SIZE,
+                max_tokens_per_file=MAX_TOKENS_PER_FILE,
+                
+                shuffle_documents=True,
+                seed=77,
                 save_final_metadata=True,
-                shuffle_documents=False,
-                seed=77
             )
         ],
-        # tasks=14,
-        # workers=8,
         tasks=NUM_TASKS,        
         workers=NUM_WORKERS,
         logging_dir=str(LOG_DIR)
     )
 
-
     executor.run()
-
 
 
 if __name__ == "__main__":
