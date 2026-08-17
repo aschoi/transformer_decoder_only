@@ -7,7 +7,7 @@ from datatrove.pipeline.readers import ParquetReader
 from datatrove.pipeline.tokens.tokenizer import DocumentTokenizer
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents
 
 TOKENIZER_PATH = ROOT / "tokenizer" / "tokenizer_llama_style.json"
 OUTPUT_DIR = ROOT/ "data" / "tokenized" / "fineweb_edu_10bt"
@@ -55,7 +55,7 @@ def main() -> None:
                 tokenizer_name_or_path=str(TOKENIZER_PATH),
                 save_filename="fineweb_edu",
                 eos_token=EOS_TOKEN,
-                local_working_dir=WORKING_DIR,
+                local_working_dir=str(WORKING_DIR),
                 save_index=True,
                 save_loss_metadata=False,
                 batch_size=BATCH_SIZE,
@@ -68,7 +68,8 @@ def main() -> None:
         ],
         tasks=NUM_TASKS,        
         workers=NUM_WORKERS,
-        logging_dir=str(LOG_DIR)
+        logging_dir=str(LOG_DIR),
+        skip_completed=True
     )
 
     executor.run()
