@@ -21,10 +21,8 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from datatrove.utils.dataset import DatatroveFolderDataset
 
-try:
-    from model import AcaiModelConfig, AcaiTransformer
-except ModuleNotFoundError:
-    from .model import AcaiModelConfig, AcaiTransformer
+from .model import AcaiModelConfig, AcaiTransformer
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +31,7 @@ class TrainConfig:
     output_dir: str
     checkpoint_dir: str
     max_tokens: int
-    max_steps: int | None
+    max_steps: int | None   
     micro_batch_size: int
     lr: float
     min_lr: float
