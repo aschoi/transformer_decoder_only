@@ -1,19 +1,4 @@
-
-
-
 from __future__ import annotations
-
-import argparse
-import contextlib
-import inspect
-import math
-import json
-import os
-import random
-import time
-from dataclasses import asdict, dataclass
-from pathlib import Path
-from typing import Any, Iterator
 
 import torch
 import torch.nn.functional as F
@@ -21,101 +6,68 @@ from torch.utils.data import DataLoader, Dataset, Sampler
 
 from datatrove.utils.dataset import DatatroveFolderDataset
 
-from .model import AcaiModelConfig, AcaiTransformer
+import os
+import math
+import time
+import json
+import random
+import contextlib
+import inspect
+from pathlib import Path
+from typing import Any, Iterator
+from dataclasses import asdict, dataclass
 
+from .model import AcaiModelConfig, AcaiTransformer
 
 
 @dataclass(frozen=True, slots=True)
 class TrainConfig:
+    """
+    class structure that stores configuration for Pre-training run
+
+    """
+
     train_data_dir: str
-    output_dir: str
+    validation_data_dir: str | None=None
+    eval_batches: int = 50
+    eval_interval: int = 500
     checkpoint_dir: str
-    max_tokens: int
+    checkpoint_interval: int = 1_000
+    gradient_checkpointing: bool=False
+    output_dir: str
+    log_interval: int = 10
+
     max_steps: int | None   
     micro_batch_size: int
+    gradient_accumulation_steps: int = 16
+    max_tokens: int
+    token_size: int | None=None
+
     lr: float
     min_lr: float
     warmup_steps: int
     weight_decay: float
-    validation_data: str | None=None
-    gradient_accumulation_steps: int = 16
     beta1: float = 0.9
     beta2: float = 0.95
     max_grad_norm: float = 1.0
     precision: str = "auto"
+
     num_workers: int = 2
-    log_interval: int = 10
-    eval_interval: int = 500
-    eval_batches: int = 50
-    checkpoint_interval: int = 1_000
     seed: int = 173
-    token_size: int | None=None
     compile_model: bool=False
-    gradient_checkpointing: bool=False
-    resume: str | None=None
-
-
-def set_seed(seed: int) -> None:
-    random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-
-def resolve_precision(name, device):
-    if device.type != "cuda":
-        if name not in {"auto", 'fp32'}:
-            raise ValueError("nope")
-        return None
-    if name == "auto":
-        return (
-            torch.bfloat16 
-            if torch.cuda.is_bf16_supported()
-            else torch.float16
-        )
-    if name == 'bf16':
-        if not torch.cuda.is_bf16_supported():
-            raise RuntimeError("nope")
-        return torch.bfloat16
-    if name =='fp16':
-        return torch.float16
-    return None
-
-def autocast_context(device, dtype):
-    if dtype is None:
-        return contextlib.nullcontext()
-    return torch.autocast(device_type=device.type, dtype=dtype)
-
-
-def get_lr(
-    step: int,
-    *, 
-    max_steps: int,
-    warmup_steps: int,
-    max_lr: float,
-    min_lr: float
-) -> float:
-
-    if step < warmup_steps:
-        return max_lr * (step+1) / warmup_steps
-
-    if step >= max_steps:
-        return min_lr
-
-    decay_ratio = ((step - warmup_steps) / (max_steps - warmup_steps))
-
-    coefficient = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-
-    return min_lr + coefficient * (max_lr - min_lr)
+    resume_fromCheckpoint_path: str | None=None
 
 
 class SequentialOffsetSampler(Sampler[int]):
+    """
+    """
     def __init__(self, dataset_size, start_index):
         self.dataset_size = dataset_size
         self.set_start_index(start_index)
 
     def set_start_index(self, start_index):
         if not 0 <= start_index <= self.dataset_size:
-            raise ValueError("nope nope")
+            raise ValueError("Start index must be between 0 and size of dataset")
         self.start_index = start_index
 
     def __iter__(self) -> Iterator[int]:
@@ -125,14 +77,76 @@ class SequentialOffsetSampler(Sampler[int]):
         return self.dataset_size - self.start_index
 
 
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def resolve_precision(
+    name: str, 
+    device: torch.device
+) -> None:
+    
+    if device.type != "cuda":
+        if name not in {"auto", 'fp32'}:
+            raise ValueError("If device is not cuda, then name must be 'auto' or 'fp32'")
+        return None
+    
+    if name == "auto":
+        return (
+            torch.bfloat16 
+            if torch.cuda.is_bf16_supported()
+            else torch.float16
+        )
+    
+    if name == 'bf16':
+        if not torch.cuda.is_bf16_supported():
+            raise RuntimeError("The current cuda device does not support bf16")
+        return torch.bfloat16
+
+    if name =='fp16':
+        return torch.float16
+    
+    return None
+
+def autocast_context(device, dtype):
+    if dtype is None:
+        return contextlib.nullcontext()
+    return torch.autocast(device_type=device.type, dtype=dtype)
+
+
+def get_lr(
+    cur_step: int,
+    *, 
+    max_steps: int,
+    warmup_steps: int,
+    max_lr: float,
+    min_lr: float
+) -> float:
+
+    if cur_step < warmup_steps:
+        return max_lr * (cur_step + 1) / warmup_steps
+
+    if cur_step >= max_steps:
+        return min_lr
+
+    decay_ratio = ((cur_step - warmup_steps) / (max_steps - warmup_steps))
+
+    coefficient = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+
+    return min_lr + coefficient * (max_lr - min_lr)
+
+
 def make_data_loader(
-        data_dir,
-        *,
-        model_config,
-        train_config,
-        training,
-        samples_already_processed
+    data_dir,
+    *,
+    model_config,
+    train_config,
+    training,
+    samples_already_processed
 ):
+    
     dataset = DatatroveFolderDataset(
         data_folder=data_dir,
         seq_len=model_config.max_seq_len,
@@ -141,16 +155,22 @@ def make_data_loader(
         seed=train_config.seed,
         return_positions=False
     )
+
     if len(dataset) == 0:
         raise ValueError("no full seq")
 
     usable_samples = len(dataset)
     sampler: SequentialOffsetSampler | None=None
+
     if training:
         usable_samples -= usable_samples % train_config.micro_batch_size
         if usable_samples == 0:
             raise ValueError("not enough usable samples")
-        sampler = SequentialOffsetSampler(usable_samples, start_index=samples_already_processed % usable_samples)
+        
+        sampler = SequentialOffsetSampler(
+            usable_samples, 
+            start_index = samples_already_processed % usable_samples
+        )
 
     loader = DataLoader(
         dataset,
@@ -168,9 +188,10 @@ def make_data_loader(
 
 
 def next_batch(
-        iterator: Iterator[dict[str, torch.Tensor]],
-        loader: DataLoader
+    iterator: Iterator[dict[str, torch.Tensor]],
+    loader: DataLoader
 ):
+    
     try:
         return next(iterator), iterator
     except StopIteration:
@@ -226,6 +247,7 @@ def load_checkpoint(
 
     model.load_state_dict(checkpoint_state["model"])
     optimizer.load_state_dict(checkpoint_state["optimizer"])
+
     if "scaler" in checkpoint_state:
         scaler.load_state_dict(checkpoint_state["scaler"])
         torch.set_rng_state(checkpoint_state["torch_rng_state"])
@@ -237,15 +259,17 @@ def load_checkpoint(
 
 
 def build_optimizer(
-        model,
-        train_config
+    model,
+    train_config
 ):
+    
     decay_parameters = []
     no_decay_parameters = []
     for parameter in model.parameters():
         if not parameter.requires_grad:
             continue
         (decay_parameters if parameter.ndim >= 2 else no_decay_parameters).append(parameter)
+
     parameter_groups = [
         {
             "params": decay_parameters,
@@ -256,16 +280,16 @@ def build_optimizer(
             "weight_decay": 0.0
         }
     ]
+
     optimizer_arguments = {
         "lr": train_config.lr,
         "betas": (train_config.beta1, train_config.beta2)
     }
+
     if "fused" in inspect.signature(torch.optim.AdamW).parameters:
         optimizer_arguments["fused"] = True
+
     return torch.optim.AdamW(parameter_groups, **optimizer_arguments)
-
-
-
 
 
 @torch.no_grad()
@@ -273,39 +297,48 @@ def evaluate(
     model,
     loader,
     *,
-    eval_batches,
+    numEvalBatches,
     amp_dtype,
     device
 ) -> tuple[float, float]:
+    """
+    """
 
-    was_training = model.training
+    prevTrainingMode = model.training
     model.eval()
-    total_loss = 0.0
-    evaluated_tokens = 0
+    totalLoss = 0.0
+    evaluatedTokenCount = 0
 
     try:
-        for batch_index, batch in enumerate(loader):
-            if batch_index >= eval_batches:
+        for iBatch, curBatch in enumerate(loader):
+
+            if iBatch >= numEvalBatches:
                 break
-            tokens = batch["input_ids"].to(device, non_blocking=True)
-            input_ids = tokens[:, :-1]
-            labels = tokens[:, 1:]
+
+            tokens = curBatch["input_ids"].to(device, non_blocking=True)
+            X = tokens[:, :-1]
+            y = tokens[:, 1:]
+
             with autocast_context(device, amp_dtype):
-                output = model(input_ids, tnsr_labels=labels, return_logits=False)
-            if output.loss is None:
+                outputFeatures = model(X, tnsr_labels=y, return_logits=False)
+
+            if outputFeatures.loss is None:
                 raise RuntimeError("Model did not return validation loss")
-            token_count = labels.numel()
-            total_loss += output.loss.item() * token_count
-            evaluated_tokens += token_count
+
+            tokenCount = y.numel()
+            totalLoss += outputFeatures.loss.item() * tokenCount
+            evaluatedTokenCount += tokenCount
     finally:
-        model.train(was_training)
+        model.train(prevTrainingMode)
     
-    if evaluated_tokens == 0:
-        raise RuntimeError("validation loader yielded no batches")
-    mean_loss = total_loss / evaluated_tokens
-    return mean_loss, math.exp(min(mean_loss, 20.0))
+    if evaluatedTokenCount == 0:
+        raise RuntimeError("Evaluate - evaluated token count == 0. Validation loader did not provide batches")
 
+    # Validation calculations
+    meanLoss = totalLoss / evaluatedTokenCount
+    perplexity = math.exp(min(meanLoss, 20.0))
 
+    return meanLoss, perplexity 
 
 
 def main() -> None:
@@ -332,42 +365,41 @@ def main() -> None:
 
     # Training Configuration
     train_config = TrainConfig(
-        train_data_dir="data/tokenized/train",
-        checkpoint_dir="checkpoints",
-        output_dir="output",
-        validation_data="data/tokenized/validation",
-        max_tokens=10_000_000_000,
-        max_steps=100,
+        train_data_dir="convoDecoderModel/data/tokenized/fineweb_edu_10bt/train",
+        validation_data_dir="convoDecoderModel/data/tokenized/fineweb_edu_10bt/validation",
+        eval_batches=50,
+        eval_interval=250,
+        checkpoint_dir="convoDecoderModel/checkpoints",
+        checkpoint_interval=1_000,
+        gradient_checkpointing=True,
+        output_dir="convoDecoderModel/output",
+        log_interval=25,
+        max_steps=25_000,
         micro_batch_size=4,
+        gradient_accumulation_steps=16,
+        max_tokens=10_000_000_000,
+        token_size=2,
         lr=3.0e-4,
         min_lr=3.0e-5,
-        warmup_steps=20,
+        warmup_steps=200,
         weight_decay=0.1,
-        max_grad_norm=1.0,
-        gradient_accumulation_steps=16,
         beta1=0.9,
         beta2=0.95,
+        max_grad_norm=1.0,
         precision="auto",
-        num_workers=2,
-        log_interval=1,
-        eval_interval=25,
-        eval_batches=25,
-        checkpoint_interval=50,
+        num_workers=2,        
         seed=717,
-        token_size=2,
         compile_model=False,
-        gradient_checkpointing=False,
+        resume_fromCheckpoint_path="convoDecoderModel/checkpoints/checkpoint_final.pt"
     )
 
     set_seed(train_config.seed)
     device = torch.device("cuda")
 
     torch.set_float32_matmul_precision("high")
-    amp_dtype  =resolve_precision(train_config.precision, device)
+    amp_dtype = resolve_precision(train_config.precision, device)
     use_grad_scaler = amp_dtype == torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=use_grad_scaler)
-
-
 
     # Model
     model = AcaiTransformer(model_config).to(device)
@@ -380,10 +412,8 @@ def main() -> None:
     print(f"Parameter count: {parameter_count}")
 
 
-
     # microBatchSize * maxSeqLen
     tokens_per_microBatch = train_config.micro_batch_size * model_config.max_seq_len
-
     # tokensPerMicrobatch * gradAccSteps
     tokens_per_optimizerStep = tokens_per_microBatch * train_config.gradient_accumulation_steps
 
@@ -418,9 +448,9 @@ def main() -> None:
     )
 
     validation_loader = None
-    if train_config.validation_data is not None:
+    if train_config.validation_data_dir is not None:
         validation_loader = make_data_loader(
-            train_config.validation_data,
+            train_config.validation_data_dir,
             model_config=model_config,
             train_config=train_config,
             training=False,
@@ -461,7 +491,9 @@ def main() -> None:
         optimizer.zero_grad(set_to_none=True)
         accumulated_loss = 0.0
 
-        # Gradient Accumulation
+        # Gradient Accumulation 
+        #   For Computational Effecieny, don't need to backprop every time.
+        #   Accumulate gradients from multiple runs all at once, then with total gradient, do one backprop
         for _ in range(train_config.gradient_accumulation_steps):
             batch, data_iterator = next_batch(data_iterator, train_loader)
 
