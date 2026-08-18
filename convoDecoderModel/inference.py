@@ -1,5 +1,3 @@
-
-
 from __future__ import annotations
 
 import argparse
@@ -14,7 +12,7 @@ def load_model(
     device: torch.device
 ) -> AcaiTransformer:
 
-    checkpoint = torch.load(
+    checkpoint = torch.load( 
         checkpoint_path,
         map_location='cpu',
         weights_only=False
@@ -151,7 +149,7 @@ def main() -> None:
 
 
     TOKENIZER_PATH = "convoDecoderModel/tokenizer/tokenizer_llama_style.json"
-    CHECKPOINT_PATH = "convoDecoderModel/checkpoints/checkpoint_final.pt"
+    CHECKPOINT_PATH = "convoDecoderModel/checkpoints/checkpoint_00003000.pt"
     PROMPT = "What is the color of the sky?"
     MAX_NEW_TOKENS = 100
     TEMPERATURE = 2

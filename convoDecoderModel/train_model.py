@@ -31,22 +31,22 @@ class TrainConfig:
     validation_data_dir: str | None=None
     eval_batches: int = 50
     eval_interval: int = 500
-    checkpoint_dir: str
+    checkpoint_dir: str = "checkpoints"
     checkpoint_interval: int = 1_000
-    gradient_checkpointing: bool=False
-    output_dir: str
+    gradient_checkpointing: bool = False
+    output_dir: str = "output"
     log_interval: int = 10
 
-    max_steps: int | None   
-    micro_batch_size: int
+    max_steps: int | None=None 
+    micro_batch_size: int = 4
     gradient_accumulation_steps: int = 16
-    max_tokens: int
+    max_tokens: int = 1000
     token_size: int | None=None
 
-    lr: float
-    min_lr: float
-    warmup_steps: int
-    weight_decay: float
+    lr: float = 1.0e-4
+    min_lr: float = 1.0e-5
+    warmup_steps: int = 20
+    weight_decay: float = 0.1
     beta1: float = 0.9
     beta2: float = 0.95
     max_grad_norm: float = 1.0
@@ -54,7 +54,7 @@ class TrainConfig:
 
     num_workers: int = 2
     seed: int = 173
-    compile_model: bool=False
+    compile_model: bool = False
     resume_fromCheckpoint_path: str | None=None
 
 
@@ -429,9 +429,9 @@ def main() -> None:
     print(f"optimizer steps: {total_steps}")
 
 
-    if train_config.resume is not None:
+    if train_config.resume_fromCheckpoint_path is not None:
         start_step, tokens_processed = load_checkpoint(
-            path=Path(train_config.resume),
+            path=Path(train_config.resume_fromCheckpoint_path),
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -555,7 +555,7 @@ def main() -> None:
             val_loss, val_perplexity = evaluate(
                 model,
                 validation_loader,
-                eval_batches=train_config.eval_batches,
+                numEvalBatches=train_config.eval_batches,
                 amp_dtype=amp_dtype,
                 device=device
             )
