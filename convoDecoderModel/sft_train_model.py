@@ -21,9 +21,9 @@ from .model import AcaiModelConfig, AcaiTransformer
 
 
 @dataclass(frozen=True, slots=True)
-class PreTrainConfig:
+class SftConfig:
     """
-    class structure that stores configuration for Pre-training run
+    class structure that stores configuration for Supervised Fine Tuning run
 
     """
 
@@ -43,7 +43,7 @@ class PreTrainConfig:
     max_tokens: int = 1000
     token_size: int | None=None
 
-    lr: float = 1.0e-4
+    lr: float = 1.0e-5
     min_lr: float = 1.0e-5
     warmup_steps: int = 20
     weight_decay: float = 0.1
@@ -75,6 +75,7 @@ class SequentialOffsetSampler(Sampler[int]):
 
     def __len__(self) -> int:
         return self.dataset_size - self.start_index
+
 
 
 def set_seed(seed: int) -> None:
@@ -110,10 +111,12 @@ def resolve_precision(
     
     return None
 
+
 def autocast_context(device, dtype):
     if dtype is None:
         return contextlib.nullcontext()
     return torch.autocast(device_type=device.type, dtype=dtype)
+
 
 
 def get_lr(
@@ -142,7 +145,7 @@ def make_data_loader(
     data_dir,
     *,
     model_config,
-    pre_train_config,
+    sft_config,
     training,
     samples_already_processed
 ):
@@ -150,9 +153,9 @@ def make_data_loader(
     dataset = DatatroveFolderDataset(
         data_folder=data_dir,
         seq_len=model_config.max_seq_len,
-        token_size=pre_train_config.token_size,
+        token_size=sft_config.token_size,
         shuffle=training,
-        seed=pre_train_config.seed,
+        seed=sft_config.seed,
         return_positions=False
     )
 
@@ -163,7 +166,7 @@ def make_data_loader(
     sampler: SequentialOffsetSampler | None=None
 
     if training:
-        usable_samples -= usable_samples % pre_train_config.micro_batch_size
+        usable_samples -= usable_samples % sft_config.micro_batch_size
         if usable_samples == 0:
             raise ValueError("not enough usable samples")
         
@@ -174,12 +177,12 @@ def make_data_loader(
 
     loader = DataLoader(
         dataset,
-        batch_size=pre_train_config.micro_batch_size,
+        batch_size=sft_config.micro_batch_size,
         shuffle=False,
         sampler=sampler,
-        num_workers=pre_train_config.num_workers,
+        num_workers=sft_config.num_workers,
         pin_memory=True,
-        persistent_workers=pre_train_config.num_workers > 0,
+        persistent_workers=sft_config.num_workers > 0,
         drop_last=training
     )
 
@@ -210,7 +213,7 @@ def save_checkpoint(
     completed_steps,
     tokens_processed,
     model_config: AcaiModelConfig,
-    pre_train_config: PreTrainConfig
+    sft_config: SftConfig
 ) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,7 +225,7 @@ def save_checkpoint(
         "optimizer": optimizer.state_dict(),
         "scaler": scaler.state_dict(),
         "AcaiModelConfig": model_config.to_dict(),
-        "trainConfig": asdict(pre_train_config),
+        "trainConfig": asdict(sft_config),
         "torch_rng_state": torch.get_rng_state(),
         "cuda_rng_state": torch.cuda.get_rng_state_all()
     }
@@ -260,7 +263,7 @@ def load_checkpoint(
 
 def build_optimizer(
     model,
-    pre_train_config
+    sft_config
 ):
     
     decay_parameters = []
@@ -273,7 +276,7 @@ def build_optimizer(
     parameter_groups = [
         {
             "params": decay_parameters,
-            "weight_decay": pre_train_config.weight_decay
+            "weight_decay": sft_config.weight_decay
         },
         {
             "params": no_decay_parameters,
@@ -282,8 +285,8 @@ def build_optimizer(
     ]
 
     optimizer_arguments = {
-        "lr": pre_train_config.lr,
-        "betas": (pre_train_config.beta1, pre_train_config.beta2)
+        "lr": sft_config.lr,
+        "betas": (sft_config.beta1, sft_config.beta2)
     }
 
     if "fused" in inspect.signature(torch.optim.AdamW).parameters:
@@ -341,6 +344,15 @@ def evaluate(
     return meanLoss, perplexity 
 
 
+
+def buildPrompt(
+    curPrompt: str
+) -> str:
+
+    pass
+
+
+
 def main() -> None:
 
     if not torch.cuda.is_available():
@@ -363,8 +375,8 @@ def main() -> None:
     )
 
 
-    # Pre Training Configuration
-    pre_train_config = PreTrainConfig(
+    # Supervised Fine Tuning Configuration
+    sft_config = SftConfig(
         train_data_dir="convoDecoderModel/data/tokenized/fineweb_edu_10bt/train",
         validation_data_dir="convoDecoderModel/data/tokenized/fineweb_edu_10bt/validation",
         eval_batches=50,
@@ -379,8 +391,8 @@ def main() -> None:
         gradient_accumulation_steps=16,
         max_tokens=10_000_000_000,
         token_size=2,
-        lr=3.0e-4,
-        min_lr=3.0e-5,
+        lr=1.0e-5,
+        min_lr=1.0e-5,
         warmup_steps=200,
         weight_decay=0.1,
         beta1=0.9,
@@ -390,37 +402,37 @@ def main() -> None:
         num_workers=2,        
         seed=717,
         compile_model=False,
-        resume_fromCheckpoint_path="convoDecoderModel/checkpoints/checkpoint_final.pt"
+        # resume_fromCheckpoint_path="convoDecoderModel/checkpoints/checkpoint_final.pt"
     )
 
-    set_seed(pre_train_config.seed)
+    set_seed(sft_config.seed)
     device = torch.device("cuda")
 
     torch.set_float32_matmul_precision("high")
-    amp_dtype = resolve_precision(pre_train_config.precision, device)
+    amp_dtype = resolve_precision(sft_config.precision, device)
     use_grad_scaler = amp_dtype == torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=use_grad_scaler)
 
     # Model
     model = AcaiTransformer(model_config).to(device)
-    if pre_train_config.gradient_checkpointing:
+    if sft_config.gradient_checkpointing:
         model.gradient_checkpointing_enable()
 
-    optimizer = build_optimizer(model, pre_train_config)
+    optimizer = build_optimizer(model, sft_config)
 
     parameter_count = sum(p.numel() for p in model.parameters())
     print(f"Parameter count: {parameter_count}")
 
 
     # microBatchSize * maxSeqLen
-    tokens_per_microBatch = pre_train_config.micro_batch_size * model_config.max_seq_len
+    tokens_per_microBatch = sft_config.micro_batch_size * model_config.max_seq_len
     # tokensPerMicrobatch * gradAccSteps
-    tokens_per_optimizerStep = tokens_per_microBatch * pre_train_config.gradient_accumulation_steps
+    tokens_per_optimizerStep = tokens_per_microBatch * sft_config.gradient_accumulation_steps
 
-    if pre_train_config.max_steps is not None:
-        total_steps = pre_train_config.max_steps
+    if sft_config.max_steps is not None:
+        total_steps = sft_config.max_steps
     else:
-        total_steps = math.ceil(pre_train_config.max_tokens / tokens_per_optimizerStep)
+        total_steps = math.ceil(sft_config.max_tokens / tokens_per_optimizerStep)
 
     start_step = 0
     tokens_processed = 0
@@ -429,9 +441,9 @@ def main() -> None:
     print(f"optimizer steps: {total_steps}")
 
 
-    if pre_train_config.resume_fromCheckpoint_path is not None:
+    if sft_config.resume_fromCheckpoint_path is not None:
         start_step, tokens_processed = load_checkpoint(
-            path=Path(pre_train_config.resume_fromCheckpoint_path),
+            path=Path(sft_config.resume_fromCheckpoint_path),
             model=model,
             optimizer=optimizer,
             scaler=scaler,
@@ -440,33 +452,33 @@ def main() -> None:
 
     samples_processed = tokens_processed // model_config.max_seq_len    
     train_loader = make_data_loader(
-        pre_train_config.train_data_dir,
+        sft_config.train_data_dir,
         model_config=model_config,
-        pre_train_config=pre_train_config,
+        pre_train_config=sft_config,
         training=True,
         samples_already_processed=samples_processed
     )
 
     validation_loader = None
-    if pre_train_config.validation_data_dir is not None:
+    if sft_config.validation_data_dir is not None:
         validation_loader = make_data_loader(
-            pre_train_config.validation_data_dir,
+            sft_config.validation_data_dir,
             model_config=model_config,
-            pre_train_config=pre_train_config,
+            pre_train_config=sft_config,
             training=False,
             samples_already_processed=0
         )
 
-    output_dir = Path(pre_train_config.output_dir)
-    checkpoint_dir = Path(pre_train_config.checkpoint_dir)
+    output_dir = Path(sft_config.output_dir)
+    checkpoint_dir = Path(sft_config.checkpoint_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     model_config.save_json(output_dir/"model_config.json")
     with (output_dir / "pre_train_config.json").open('w', encoding="utf-8") as f:
-        json.dump(asdict(pre_train_config), f, indent=4, sort_keys=True)
+        json.dump(asdict(sft_config), f, indent=4, sort_keys=True)
         f.write("\n")
 
-    pre_training_model = torch.compile(model) if pre_train_config.compile_model else model
+    pre_training_model = torch.compile(model) if sft_config.compile_model else model
 
 
     # TRAINING
@@ -480,9 +492,9 @@ def main() -> None:
         curr_lr = get_lr(
             step,
             max_steps=total_steps,
-            warmup_steps=pre_train_config.warmup_steps,
-            max_lr=pre_train_config.lr,
-            min_lr=pre_train_config.min_lr
+            warmup_steps=sft_config.warmup_steps,
+            max_lr=sft_config.lr,
+            min_lr=sft_config.min_lr
         )
 
         for param_group in optimizer.param_groups:
@@ -494,7 +506,7 @@ def main() -> None:
         # Gradient Accumulation 
         #   For Computational Effecieny, don't need to backprop every time.
         #   Accumulate gradients from multiple runs all at once, then with total gradient, do one backprop
-        for _ in range(pre_train_config.gradient_accumulation_steps):
+        for _ in range(sft_config.gradient_accumulation_steps):
             batch, data_iterator = next_batch(data_iterator, train_loader)
 
             tokens = batch["input_ids"].to(device, non_blocking=True)
@@ -507,7 +519,7 @@ def main() -> None:
                 if output.loss is None:
                     raise RuntimeError("oops")
                 
-                loss = output.loss / pre_train_config.gradient_accumulation_steps
+                loss = output.loss / sft_config.gradient_accumulation_steps
 
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
@@ -521,7 +533,7 @@ def main() -> None:
 
         if scaler.is_enabled():
             scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), pre_train_config.max_grad_norm)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), sft_config.max_grad_norm)
 
         # Optimizer 
         if scaler.is_enabled():
@@ -533,11 +545,11 @@ def main() -> None:
 
         completed_steps = step + 1
         # Logging
-        if completed_steps % pre_train_config.log_interval == 0:
+        if completed_steps % sft_config.log_interval == 0:
             torch.cuda.synchronize()
             elapsed = time.perf_counter() - logging_start
             tokens_per_second = logging_tokens / elapsed
-            mean_loss = accumulated_loss / pre_train_config.gradient_accumulation_steps
+            mean_loss = accumulated_loss / sft_config.gradient_accumulation_steps
             print(
                 f"completed steps: {completed_steps} | "
                 f"loss: {mean_loss:.4f} | "
@@ -551,11 +563,11 @@ def main() -> None:
             logging_tokens = 0
             logging_start = time.perf_counter()
 
-        if validation_loader is not None and completed_steps % pre_train_config.eval_interval == 0:
+        if validation_loader is not None and completed_steps % sft_config.eval_interval == 0:
             val_loss, val_perplexity = evaluate(
                 model,
                 validation_loader,
-                numEvalBatches=pre_train_config.eval_batches,
+                numEvalBatches=sft_config.eval_batches,
                 amp_dtype=amp_dtype,
                 device=device
             )
@@ -568,7 +580,7 @@ def main() -> None:
             )
 
         # Checkpointing
-        if completed_steps % pre_train_config.checkpoint_interval == 0:
+        if completed_steps % sft_config.checkpoint_interval == 0:
             checkpoint_path = checkpoint_dir / f"checkpoint_{completed_steps:08d}.pt"
             checkpoint_start = time.perf_counter()
             save_checkpoint(
@@ -579,7 +591,7 @@ def main() -> None:
                 completed_steps=completed_steps,
                 tokens_processed=tokens_processed,
                 model_config=model_config,
-                pre_train_config=pre_train_config
+                pre_train_config=sft_config
             )
             logging_start += time.perf_counter() - checkpoint_start
 
@@ -593,7 +605,7 @@ def main() -> None:
         completed_steps=total_steps,
         tokens_processed=tokens_processed,
         model_config=model_config,
-        pre_train_config=pre_train_config
+        pre_train_config=sft_config
     )
 
 
