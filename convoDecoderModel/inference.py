@@ -174,7 +174,9 @@ def generate(
     return generated_ids
 
 
-def buildPrompt():
+def buildPrompt(
+    curPrompt: str
+) -> str:
     pass
 
 
