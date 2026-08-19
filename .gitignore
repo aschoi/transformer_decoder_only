@@ -29,6 +29,7 @@ requirements-dev.txt
 requirements-runpod.txt
 aws/
 datasets/
+data/
 
 # Type checker and linter caches
 .mypy_cache/
