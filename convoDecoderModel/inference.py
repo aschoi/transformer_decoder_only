@@ -28,7 +28,12 @@ def load_model(
     model.eval()
 
     if device.type == "cuda":
-        model = model.to(device=device, dtype=torch.bfloat16)
+        dtype = (
+            torch.bfloat16
+            if torch.cuda.is_bf16_supported()
+            else torch.float16
+        )
+        model = model.to(device=device, dtype=dtype)
     else:
         model = model.to(device)
     return model
@@ -73,67 +78,104 @@ def sample_next_token(
             float("-inf")
         )
 
-        probabilities = torch.softmax(
-            logits,
-            dim=-1
-        )
+    probabilities = torch.softmax(
+        logits,
+        dim=-1
+    )
 
-        return torch.multinomial(
-            probabilities,
-            num_samples=1
-        )
+    return torch.multinomial(
+        probabilities,
+        num_samples=1
+    )
+
 
 
 
 @torch.inference_mode()
 def generate(
     model: AcaiTransformer,
-    tokenizer: Tokenizer,
-    prompt: str,
-    device: torch.device,
-    max_new_tokens: int = 100,
-    eos_token_id: int = 0,
+    input_ids: torch.Tensor,
     *,
+    max_new_tokens: int,
+    max_seq_len: int,
+    eos_token_id: int = 0,
     temperature: float = 0.8,
     top_k: int | None=50
-) -> list[int]:
+) -> torch.Tensor:
 
-    encoding = tokenizer.encode(prompt, add_special_tokens=False)
+    if input_ids.ndim != 2:
+        raise ValueError("input_ids must have shape: (batch_size, seq_len)")
+    
+    if max_new_tokens <= 0:
+        return input_ids
 
-    prompt_ids = encoding.ids
+    model.eval()
 
-    if not prompt_ids:
-        raise ValueError("Prompt must produce at least one token")
+    batch_size, prompt_length = input_ids.shape
+    required_capacity = prompt_length + max_new_tokens
+    if required_capacity > max_seq_len:
+        raise ValueError(f"Requested sequence lengh, {required_capacity} exceeds max sequence length, {max_seq_len}")
 
-    if len(prompt_ids) > model.config.max_seq_len:
-        raise ValueError(f"Prompt contains {len(prompt_ids)} tokens, but maximum sequence length allowed: {model.config.max_seq_len}")
+    parameter = next(model.parameters())
+    device = parameter.device
+    dtype = parameter.dtype
 
-    input_ids = torch.tensor([prompt_ids], dtype=torch.int64, device=device)
+    input_ids = input_ids.to(device)
 
+    kv_caches = model.create_kv_caches(
+        batch_size=batch_size,
+        max_seq_len=max_seq_len,
+        device=device,
+        dtype=dtype
+    )
 
-    for _ in range(max_new_tokens):
-        if input_ids.size(1) >= model.config.max_seq_len:
-            break
+    # PREFILL
+    # Process entire prompt exactly once. 
+    # Every decoder layer stores ALL prompt K/V states.
+    output = model(input_ids, kv_caches=kv_caches)
+    logits = output.logits
+    next_token = sample_next_token(
+        logits[:, -1, :],
+        temperature=temperature,
+        top_k=top_k
+    )
+    generated_ids = torch.cat(
+        (input_ids, next_token),
+        dim=1
+    )
+    # EOS directly after prompt.
+    if (eos_token_id is not None 
+        and batch_size == 1 
+        and next_token.item() == eos_token_id
+    ):
+        return generated_ids
 
-        output = model(input_ids, return_logits=True)
-
-        if output.logits is None:
-            raise RuntimeError("Model did not return logits. Inference requires return_logits=True")
-
-        next_token_logits = output.logits[:, -1, :]
-
+    # Decode
+    for _ in range(max_new_tokens - 1):
+        output = model(next_token, kv_caches=kv_caches)
+        logits = output.logits
         next_token = sample_next_token(
-            next_token_logits,
-            temperature=temperature,
+            logits[:, -1, :], 
+            temperature=temperature, 
             top_k=top_k
         )
 
-        input_ids = torch.cat([input_ids, next_token], dim=1)
+        generated_ids = torch.cat(
+            (generated_ids, next_token),
+            dim=1
+        )
 
-        if next_token.item() == eos_token_id:
+        if (eos_token_id is not None
+            and batch_size == 1
+            and next_token.item() == eos_token_id
+        ):
             break
 
-    return input_ids[0].tolist()
+    return generated_ids
+
+
+def buildPrompt():
+    pass
 
 
 
@@ -145,15 +187,16 @@ def main() -> None:
     # )
 
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
 
-
-    TOKENIZER_PATH = "convoDecoderModel/tokenizer/tokenizer_llama_style.json"
-    CHECKPOINT_PATH = "convoDecoderModel/checkpoints/checkpoint_00003000.pt"
-    PROMPT = "What is the color of the sky?"
+    PROMPT = "Describe how to bake cookies."
     MAX_NEW_TOKENS = 100
-    TEMPERATURE = 2
-    TOP_K = 7
+    TEMPERATURE = 1
+    TOP_K = 50
+    TOKENIZER_PATH = "convoDecoderModel/tokenizer/tokenizer_llama_style.json"
+    CHECKPOINT_PATH = "convoDecoderModel/checkpoints/checkpoint_00019000.pt"
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     tokenizer = Tokenizer.from_file(TOKENIZER_PATH)
 
@@ -168,25 +211,58 @@ def main() -> None:
     if EOS_TOKEN_ID is None:
         raise RuntimeError("Tokenizer does not contain eos")
 
+    if len(PROMPT) == 0:
+        raise ValueError("Prompt must contain at least one token.")
+
+
+
+    encoding = tokenizer.encode(PROMPT)
+    input_ids = torch.tensor(
+        [encoding.ids],
+        dtype=torch.int64,
+        device=device
+    )
+
+    if input_ids.size(1) == 0:
+        raise ValueError("Prompt must contain at least one token.")
+
     generated_ids = generate(
         model,
-        tokenizer,
-        PROMPT,
-        device=device,
-        max_new_tokens=MAX_NEW_TOKENS,
+        input_ids,
+        max_new_tokens=200,
+        max_seq_len=model.config.max_seq_len,
         temperature=TEMPERATURE,
         top_k=TOP_K,
         eos_token_id=EOS_TOKEN_ID
     )
 
     text = tokenizer.decode(
-        generated_ids,
-        skip_special_tokens=True
+        generated_ids[0].tolist()
     )
 
     print()
     print(text)
     print()
+
+    # generated_ids = generate(
+    #     model,
+    #     tokenizer,
+    #     PROMPT,
+    #     device=device,
+    #     max_new_tokens=MAX_NEW_TOKENS,
+    #     temperature=TEMPERATURE,
+    #     top_k=TOP_K,
+    #     eos_token_id=EOS_TOKEN_ID
+    # )
+
+    # text = tokenizer.decode(
+    #     generated_ids,
+    #     skip_special_tokens=True
+    # )
+
+    # print()
+    # print(text)
+    # print()
 
 
 

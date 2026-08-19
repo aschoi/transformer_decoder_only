@@ -11,8 +11,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from transformer.decoder import TransformerDecoder
-
+from .transformer.decoder import TransformerDecoder
+from .transformer.kv_cache import KVCache
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +77,8 @@ class CausalOutput(NamedTuple):
     loss: torch.Tensor | None
     logits: torch.Tensor | None
     attention_weights: list[torch.Tensor] | None
+
+
 
 
 class AcaiTransformer(nn.Module):
@@ -171,6 +173,28 @@ class AcaiTransformer(nn.Module):
         return total
 
 
+    def create_kv_caches(
+        self,
+        *,
+        batch_size: int,
+        max_seq_len: int,
+        device: torch.device,
+        dtype: torch.dtype
+    ) -> list[KVCache]:
+        
+        return [
+            KVCache(
+                batch_size=batch_size,
+                num_kv_heads=layer.sublayer1_attention.num_attn_heads,
+                max_seq_len=max_seq_len,
+                head_dim=layer.sublayer1_attention.d_k,
+                device=device,
+                dtype=dtype                
+            )
+            for layer in self.acai_decoder.stack_transformer_layers
+        ]
+
+
     def forward(
         self,
         tnsr_inputIds: torch.Tensor,
@@ -178,11 +202,14 @@ class AcaiTransformer(nn.Module):
         tnsr_labels: torch.Tensor | None = None,
         tnsr_attn_mask: torch.Tensor | None = None,
         return_attn_weights: bool = False,
-        return_logits: bool =True
+        return_logits: bool =True,
+        kv_caches: list[KVCache] | None=None
     ) -> CausalOutput:
         """
         """
 
+        if self.training and kv_caches is not None:
+            raise RuntimeError("KV caching cannot be used during training.") 
         if tnsr_inputIds.ndim != 2:
             raise ValueError("input ids must have shape (batch, sequence length)")
         if tnsr_inputIds.dtype != torch.int64:
@@ -206,7 +233,7 @@ class AcaiTransformer(nn.Module):
 
         # For debugging/educational purposes
         if return_attn_weights:
-            output_features, attn_weights = self.acai_decoder(embedded_ids, tnsr_attn_mask, return_attn_weights)
+            output_features, attn_weights = self.acai_decoder(embedded_ids, tnsr_attn_mask, return_attn_weights, kv_caches)
 
         elif (self.training and self._gradient_checkpointing):
             # Checkpoing + memory effiecient path
@@ -223,7 +250,7 @@ class AcaiTransformer(nn.Module):
             attn_weights = None
                 # Inference. Checkpointing uncessessary. 
         else:
-            output_features, _ = self.acai_decoder(embedded_ids, tnsr_attn_mask, return_attn_weights=False)
+            output_features, _ = self.acai_decoder(embedded_ids, tnsr_attn_mask, return_attn_weights=False, kv_caches=kv_caches)
             attn_weights = None
 
         # Language Model Projection
