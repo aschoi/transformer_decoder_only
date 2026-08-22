@@ -61,6 +61,8 @@ class SftConfig:
     num_workers: int = 2
     seed: int = 173
     compile_model: bool = False
+    # pretraining_epochs
+    # sft_training_epochs   # for the future, have sft training epochs
 
 
 
@@ -94,6 +96,9 @@ class ResumableRandomSampler(Sampler[int]):
     def advance_epoch(self) -> None:
         self.epoch += 1
         self.start_index = 0
+
+    def get_epoch(self) -> None:
+        return self.epoch
 
     def __iter__(self) -> Iterator[int]:
         generator = torch.Generator()
@@ -139,8 +144,10 @@ def autocast_context(
     device: torch.device,
     dtype: torch.dtype | None,
 ) -> contextlib.AbstractContextManager:
+    
     if dtype is None:
         return contextlib.nullcontext()
+    
     return torch.autocast(device_type=device.type, dtype=dtype)
 
 
@@ -161,6 +168,7 @@ def get_lr(
         raise ValueError("Warmup steps must be >= 0")
     if warmup_steps > max_steps:
         raise ValueError("Warm up steps must be smaller than max steps")
+
 
     if warmup_steps > 0 and cur_step < warmup_steps:
         return max_lr * (cur_step + 1) / warmup_steps
@@ -263,14 +271,19 @@ def make_data_loader(
 
 def next_batch(
     iterator: Iterator[dict[str, torch.Tensor]],
-    loader: DataLoader
+    loader: DataLoader,
+    total_epochs: int
 ) -> tuple[dict[str, torch.Tensor], Iterator[dict[str, torch.Tensor]]]:
+
     
     try:
         return next(iterator), iterator
     except StopIteration:
         if isinstance(loader.sampler, ResumableRandomSampler):
             loader.sampler.advance_epoch()
+
+            if loader.sampler.get_epoch() >= total_epochs:
+                return None, iterator
 
         iterator = iter(loader)
         return next(iterator), iterator
@@ -593,7 +606,10 @@ def main() -> None:
         seed=717,
         compile_model=False,
         # resume_fromCheckpoint_path="convoDecoderModel/checkpoints/checkpoint_final.pt"
+        # pretraining_epochs
+        # sft_training_epochs
     )
+    EPOCHS = 1
 
     validate_config(model_config, sft_config)
 
@@ -686,7 +702,10 @@ def main() -> None:
     logging_start = time.perf_counter()
     completed_steps = start_step
 
-    for step in range(start_step, sft_config.max_steps):
+    sftFinished = False
+
+    for step in range(start_step, sft_config.max_steps):        
+
         curr_lr = get_lr(
             step,
             max_steps=sft_config.max_steps,
@@ -711,7 +730,10 @@ def main() -> None:
         #   Accumulate gradients from multiple runs all at once, then with total gradient, do one backprop
         for _ in range(sft_config.gradient_accumulation_steps):
 
-            batch, data_iterator = next_batch(data_iterator, train_loader)
+            batch, data_iterator = next_batch(data_iterator, train_loader, EPOCHS)
+            if batch is None:
+                sftFinished = True
+                break
 
             supervised_tokens = int(
                 (batch['labels'][:, 1:] != IGNORE_INDEX).sum().item()
@@ -723,6 +745,9 @@ def main() -> None:
             micro_batches.append((batch, supervised_tokens))
             step_supervised_tokens += supervised_tokens
 
+        if sftFinished:
+            break
+        
         step_loss_numerator = 0.0
 
         for batch, micro_supervised_tokens in micro_batches:
