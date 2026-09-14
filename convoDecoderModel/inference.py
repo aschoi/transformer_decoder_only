@@ -174,14 +174,9 @@ def generate(
     return generated_ids
 
 
-def buildPrompt(
-    curPrompt: str
-) -> str:
-    pass
-
-
 
 def main() -> None:
+
     # parser = argparse.ArgumentParser()
 
     # parser.add_argument(
@@ -189,14 +184,12 @@ def main() -> None:
     # )
 
 
-    
-
-    PROMPT = "Describe how to bake cookies."
-    MAX_NEW_TOKENS = 100
-    TEMPERATURE = 1
+    PROMPT = "Imagine you are walking in a park."
+    MAX_NEW_TOKENS = 1000
+    TEMPERATURE = 0.77
     TOP_K = 50
     TOKENIZER_PATH = "convoDecoderModel/tokenizer/tokenizer_llama_style.json"
-    CHECKPOINT_PATH = "convoDecoderModel/checkpoints/checkpoint_00019000.pt"
+    CHECKPOINT_PATH = "convoDecoderModel/checkpoints/sft/checkpoint_00034000.pt"
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -231,7 +224,7 @@ def main() -> None:
     generated_ids = generate(
         model,
         input_ids,
-        max_new_tokens=200,
+        max_new_tokens=MAX_NEW_TOKENS,
         max_seq_len=model.config.max_seq_len,
         temperature=TEMPERATURE,
         top_k=TOP_K,
@@ -245,28 +238,6 @@ def main() -> None:
     print()
     print(text)
     print()
-
-    # generated_ids = generate(
-    #     model,
-    #     tokenizer,
-    #     PROMPT,
-    #     device=device,
-    #     max_new_tokens=MAX_NEW_TOKENS,
-    #     temperature=TEMPERATURE,
-    #     top_k=TOP_K,
-    #     eos_token_id=EOS_TOKEN_ID
-    # )
-
-    # text = tokenizer.decode(
-    #     generated_ids,
-    #     skip_special_tokens=True
-    # )
-
-    # print()
-    # print(text)
-    # print()
-
-
 
 if __name__ == "__main__":
     main()
