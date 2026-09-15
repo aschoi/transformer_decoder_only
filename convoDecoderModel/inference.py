@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import Iterable
 import torch
 from tokenizers import Tokenizer
 
+from .chat_template import ChatSpecialTokens, encode_chat_prompt
 from .model import AcaiModelConfig, AcaiTransformer
 
 def load_model(
@@ -98,7 +100,7 @@ def generate(
     *,
     max_new_tokens: int,
     max_seq_len: int,
-    eos_token_id: int = 0,
+    stop_token_ids: Iterable[int] | None=None,
     temperature: float = 0.8,
     top_k: int | None=50
 ) -> torch.Tensor:
@@ -115,6 +117,8 @@ def generate(
     required_capacity = prompt_length + max_new_tokens
     if required_capacity > max_seq_len:
         raise ValueError(f"Requested sequence lengh, {required_capacity} exceeds max sequence length, {max_seq_len}")
+
+    stop_ids = frozenset() if stop_token_ids is None else frozenset(stop_token_ids)
 
     parameter = next(model.parameters())
     device = parameter.device
@@ -143,11 +147,8 @@ def generate(
         (input_ids, next_token),
         dim=1
     )
-    # EOS directly after prompt.
-    if (eos_token_id is not None 
-        and batch_size == 1 
-        and next_token.item() == eos_token_id
-    ):
+    # stop token directly after prompt.
+    if batch_size == 1 and next_token.item() in stop_ids:
         return generated_ids
 
     # Decode
@@ -165,10 +166,7 @@ def generate(
             dim=1
         )
 
-        if (eos_token_id is not None
-            and batch_size == 1
-            and next_token.item() == eos_token_id
-        ):
+        if batch_size == 1 and next_token.item() in stop_ids:
             break
 
     return generated_ids
@@ -184,7 +182,8 @@ def main() -> None:
     # )
 
 
-    PROMPT = "Imagine you are walking in a park."
+    PROMPT = "What is gravity?"
+    SYSTEM_PROMPT = None
     MAX_NEW_TOKENS = 1000
     TEMPERATURE = 0.77
     TOP_K = 50
@@ -201,19 +200,22 @@ def main() -> None:
     if tokenizer_vocab_size != model.config.vocab_size:
         raise RuntimeError("tokenizer/model vocab size mismatch")
 
-    EOS_TOKEN_ID = tokenizer.token_to_id("<|endoftext|>")
+    special = ChatSpecialTokens.from_tokenizer(tokenizer)
 
-    if EOS_TOKEN_ID is None:
-        raise RuntimeError("Tokenizer does not contain eos")
 
     if len(PROMPT) == 0:
         raise ValueError("Prompt must contain at least one token.")
 
+    messages: list[dict[str, str]] = []
+    if SYSTEM_PROMPT:
+        messages.append({"role": "system", "content": SYSTEM_PROMPT})
+    messages.append({"role": "user", "content": PROMPT})
 
+    # wrap with chat_template
+    prompt_ids = encode_chat_prompt(messages, tokenizer, special)
 
-    encoding = tokenizer.encode(PROMPT)
     input_ids = torch.tensor(
-        [encoding.ids],
+        [prompt_ids],
         dtype=torch.int64,
         device=device
     )
@@ -228,12 +230,12 @@ def main() -> None:
         max_seq_len=model.config.max_seq_len,
         temperature=TEMPERATURE,
         top_k=TOP_K,
-        eos_token_id=EOS_TOKEN_ID
+        stop_token_ids=special.stop_ids
     )
 
-    text = tokenizer.decode(
-        generated_ids[0].tolist()
-    )
+    completion_ids = generated_ids[0, input_ids.size(1):].tolist()
+
+    text = tokenizer.decode(completion_ids)
 
     print()
     print(text)
