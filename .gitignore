@@ -58,3 +58,5 @@ payload.json
 response.json
 
 kv_cache_benchmark_results
+
+.claude/
